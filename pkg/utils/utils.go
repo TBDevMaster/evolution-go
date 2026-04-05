@@ -3,6 +3,7 @@ package utils
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"runtime"
@@ -251,6 +252,60 @@ func CreateSocks5Proxy(socks5Host, socks5Port, user, password string) (proxy.Dia
 
 	// 	return nil, nil
 	// }, nil
+}
+
+func NormalizeProxyProtocol(protocol, port string) string {
+	normalized := strings.ToLower(strings.TrimSpace(protocol))
+
+	switch normalized {
+	case "socks":
+		return "socks5"
+	case "http", "https", "socks5":
+		return normalized
+	}
+
+	switch strings.TrimSpace(port) {
+	case "1080", "2080":
+		return "socks5"
+	}
+
+	portNum, err := strconv.Atoi(strings.TrimSpace(port))
+	if err == nil && portNum >= 42000 && portNum <= 43000 {
+		return "socks5"
+	}
+
+	return "http"
+}
+
+func BuildProxyAddress(protocol, host, port, user, password string) (string, error) {
+	if strings.TrimSpace(host) == "" {
+		return "", fmt.Errorf("proxy host is required")
+	}
+
+	if strings.TrimSpace(port) == "" {
+		return "", fmt.Errorf("proxy port is required")
+	}
+
+	normalizedProtocol := NormalizeProxyProtocol(protocol, port)
+
+	if normalizedProtocol != "http" && normalizedProtocol != "https" && normalizedProtocol != "socks5" {
+		return "", fmt.Errorf("unsupported proxy protocol %q", protocol)
+	}
+
+	proxyURL := &url.URL{
+		Scheme: normalizedProtocol,
+		Host:   net.JoinHostPort(strings.TrimSpace(host), strings.TrimSpace(port)),
+	}
+
+	if user != "" {
+		if password != "" {
+			proxyURL.User = url.UserPassword(user, password)
+		} else {
+			proxyURL.User = url.User(user)
+		}
+	}
+
+	return proxyURL.String(), nil
 }
 
 func UpdateUserInfo(values interface{}, field string, value string) interface{} {

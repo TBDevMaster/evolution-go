@@ -9,6 +9,7 @@ import (
 	config "github.com/EvolutionAPI/evolution-go/pkg/config"
 	instance_model "github.com/EvolutionAPI/evolution-go/pkg/instance/model"
 	instance_service "github.com/EvolutionAPI/evolution-go/pkg/instance/service"
+	"github.com/EvolutionAPI/evolution-go/pkg/utils"
 )
 
 type InstanceHandler interface {
@@ -449,6 +450,7 @@ func (i *instanceHandler) SetProxy(ctx *gin.Context) {
 	}
 
 	responseData := gin.H{
+		"protocol": utils.NormalizeProxyProtocol(data.Protocol, data.Port),
 		"host":    data.Host,
 		"port":    data.Port,
 		"hasAuth": data.Username != "" && data.Password != "",

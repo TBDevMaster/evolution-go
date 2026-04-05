@@ -139,6 +139,7 @@ MINIO_REGION=us-east-1
 
 | Variável | Descrição |
 |----------|-----------|
+| `PROXY_PROTOCOL` | Protocolo do proxy (`http`, `https`, `socks5`) |
 | `PROXY_HOST` | Hostname do proxy |
 | `PROXY_PORT` | Porta do proxy |
 | `PROXY_USERNAME` | Usuário (opcional) |
@@ -146,6 +147,7 @@ MINIO_REGION=us-east-1
 
 **Exemplo:**
 ```env
+PROXY_PROTOCOL=http
 PROXY_HOST=proxy.empresa.com
 PROXY_PORT=8080
 PROXY_USERNAME=usuario
