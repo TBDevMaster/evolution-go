@@ -436,7 +436,23 @@ MINIO_REGION=us-east-1
 
 ## Proxy
 
-Configuração de proxy HTTP para instâncias WhatsApp.
+Configuração de proxy para instâncias WhatsApp.
+
+O protocolo pode ser definido explicitamente com `PROXY_PROTOCOL`.
+Valores suportados:
+- `http`
+- `https`
+- `socks5`
+
+Se omitido, o Evolution GO tentará inferir o protocolo a partir da porta e usará `http` como padrão.
+
+### PROXY_PROTOCOL
+
+Protocolo do proxy.
+
+```env
+PROXY_PROTOCOL=http
+```
 
 ### PROXY_HOST
 

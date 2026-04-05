@@ -514,7 +514,14 @@ curl -X DELETE "http://localhost:4000/instance/delete/vendas" \
 
 ## Configurar Proxy
 
-Configura proxy HTTP para a instância.
+Configura proxy para a instância.
+
+O campo `protocol` é opcional. Valores suportados:
+- `http`
+- `https`
+- `socks5`
+
+Se omitido, o Evolution GO tentará inferir o protocolo a partir da porta e usará `http` como padrão.
 
 ### Endpoint
 ```
@@ -530,6 +537,7 @@ apikey: SUA-GLOBAL-API-KEY
 ### Body
 ```json
 {
+  "protocol": "http",
   "host": "proxy.exemplo.com",
   "port": "8080",
   "username": "usuario",
@@ -542,6 +550,7 @@ apikey: SUA-GLOBAL-API-KEY
 {
   "message": "success",
   "data": {
+    "protocol": "http",
     "host": "proxy.exemplo.com",
     "port": "8080",
     "hasAuth": true
@@ -555,6 +564,7 @@ curl -X POST "http://localhost:4000/instance/proxy/vendas" \
   -H "Content-Type: application/json" \
   -H "apikey: SUA-GLOBAL-API-KEY" \
   -d '{
+    "protocol": "http",
     "host": "proxy.exemplo.com",
     "port": "8080",
     "username": "usuario",
