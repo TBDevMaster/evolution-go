@@ -204,7 +204,7 @@ func (i instances) Connect(data *ConnectStruct, instance *instance_model.Instanc
 
 	i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Processing subscribe events: %v", instance.Id, data.Subscribe)
 
-	if len(data.Subscribe) == 0 {
+	if len(data.Subscribe) == 0 && !i.config.SendOnlyMode {
 		subscribedEvents = append(subscribedEvents, event_types.MESSAGE)
 	} else if len(data.Subscribe) > 0 && data.Subscribe[0] == "ALL" {
 		for _, event := range event_types.AllEventTypes {

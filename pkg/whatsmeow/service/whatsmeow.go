@@ -350,7 +350,11 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 	}
 
 	store.DeviceProps.Os = &cd.Instance.OsName
-	store.DeviceProps.RequireFullSync = proto.Bool(true)
+	requireFullSync := w.config.WhatsappFullSync && !w.config.SendOnlyMode
+	store.DeviceProps.RequireFullSync = proto.Bool(requireFullSync)
+	if !requireFullSync {
+		w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] WhatsApp full history sync disabled", cd.Instance.Id)
+	}
 
 	if w.config.WhatsappVersionMajor != 0 && w.config.WhatsappVersionMinor != 0 && w.config.WhatsappVersionPatch != 0 {
 		w.loggerWrapper.GetLogger(cd.Instance.Id).LogInfo("[%s] Setting whatsapp version to %d.%d.%d", cd.Instance.Id, w.config.WhatsappVersionMajor, w.config.WhatsappVersionMinor, w.config.WhatsappVersionPatch)
@@ -851,6 +855,9 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 
 	switch evt := rawEvt.(type) {
 	case *events.AppStateSyncComplete:
+		if mycli.config.SendOnlyMode {
+			return
+		}
 		if len(mycli.WAClient.Store.PushName) > 0 && evt.Name == appstate.WAPatchCriticalBlock {
 			err := mycli.WAClient.SendPresence(context.Background(), types.PresenceUnavailable)
 			if err != nil {
@@ -904,24 +911,24 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 
 			postMap["data"] = dataMap
 
-			go schedulePresenceUpdates(mycli)
+			if !mycli.config.SendOnlyMode {
+				go schedulePresenceUpdates(mycli)
 
-			err := mycli.WAClient.SendPresence(context.Background(), types.PresenceAvailable)
-			if err != nil {
-				mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Failed to send available presence %v", mycli.userID, err)
-			} else {
-				mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Marked self as available", mycli.userID)
+				err := mycli.WAClient.SendPresence(context.Background(), types.PresenceAvailable)
+				if err != nil {
+					mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Failed to send available presence %v", mycli.userID, err)
+				} else {
+					mycli.loggerWrapper.GetLogger(mycli.userID).LogWarn("[%s] Marked self as available", mycli.userID)
+				}
 			}
 
 			mycli.Instance.Connected = true
 			mycli.Instance.DisconnectReason = ""
-			err = mycli.instanceRepository.UpdateConnected(mycli.Instance.Id, mycli.Instance.Connected, mycli.Instance.DisconnectReason)
-			if err != nil {
+			if err := mycli.instanceRepository.UpdateConnected(mycli.Instance.Id, mycli.Instance.Connected, mycli.Instance.DisconnectReason); err != nil {
 				mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] Error updating instance: %s", mycli.Instance.Id, err)
 			}
 
-			err = mycli.instanceRepository.UpdateQrcode(mycli.Instance.Id, "")
-			if err != nil {
+			if err := mycli.instanceRepository.UpdateQrcode(mycli.Instance.Id, ""); err != nil {
 				mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] Error updating instance: %s", mycli.Instance.Id, err)
 			}
 		}
@@ -1027,6 +1034,11 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 
 		postMap["data"] = dataMap
 	case *events.Message:
+		if !mycli.shouldProcessIncomingMessages() {
+			mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Incoming message ignored by send-only/subscription mode - ID: %s, From: %s", mycli.userID, evt.Info.ID, evt.Info.Chat.String())
+			return
+		}
+
 		doWebhook = true
 		postMap["event"] = "Message"
 		// Message received
@@ -1607,6 +1619,11 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 
 		mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] Chat archived", mycli.userID)
 	case *events.HistorySync:
+		if mycli.config.SendOnlyMode {
+			mycli.loggerWrapper.GetLogger(mycli.userID).LogInfo("[%s] History sync ignored by send-only mode: %v", mycli.userID, evt.Data.SyncType)
+			return
+		}
+
 		doWebhook = true
 		postMap["event"] = "HistorySync"
 
@@ -1882,6 +1899,11 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 }
 
 func (w *whatsmeowService) CallWebhook(instance *instance_model.Instance, queueName string, jsonData []byte) {
+	if w.config.SendOnlyMode {
+		w.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] External event dispatch skipped by send-only mode: %s", instance.Id, queueName)
+		return
+	}
+
 	var data map[string]interface{}
 	if err := json.Unmarshal(jsonData, &data); err != nil {
 		return
@@ -1896,9 +1918,9 @@ func (w *whatsmeowService) CallWebhook(instance *instance_model.Instance, queueN
 
 	var subscriptions []string
 
-	if len(eventArray) < 1 {
+	if strings.TrimSpace(instance.Events) == "" && !w.config.SendOnlyMode {
 		subscriptions = append(subscriptions, event_types.MESSAGE)
-	} else {
+	} else if strings.TrimSpace(instance.Events) != "" {
 		for _, arg := range eventArray {
 			if !event_types.IsEventType(arg) {
 				w.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Message type discarded: %s", instance.Id, arg)
@@ -2000,6 +2022,16 @@ func contains(subscriptions []string, event string) bool {
 	return false
 }
 
+func (mycli *MyClient) shouldProcessIncomingMessages() bool {
+	if mycli.config.SendOnlyMode {
+		return false
+	}
+
+	return contains(mycli.subscriptions, "ALL") ||
+		contains(mycli.subscriptions, event_types.MESSAGE) ||
+		mycli.config.DatabaseSaveMessages
+}
+
 func (w *whatsmeowService) sendToQueueOrWebhook(instance *instance_model.Instance, queueName string, jsonData []byte) {
 	if instance.RabbitmqEnable == "enabled" || instance.RabbitmqEnable == "true" {
 		err := w.rabbitmqProducer.Produce(queueName, jsonData, instance.RabbitmqEnable, instance.Id)
@@ -2085,9 +2117,9 @@ func (w whatsmeowService) StartInstance(instanceId string) error {
 
 	var subscribedEvents []string
 
-	if len(eventArray) < 1 {
+	if strings.TrimSpace(instance.Events) == "" && !w.config.SendOnlyMode {
 		subscribedEvents = append(subscribedEvents, event_types.MESSAGE)
-	} else {
+	} else if strings.TrimSpace(instance.Events) != "" {
 		for _, arg := range eventArray {
 			if !event_types.IsEventType(arg) {
 				w.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] Message type discarded: %s", instanceId, arg)
@@ -2191,6 +2223,11 @@ func getExtensionFromMimeType(mimeType string) string {
 }
 
 func (w *whatsmeowService) SendToGlobalQueues(eventType string, payload []byte, userId string) {
+	if w.config.SendOnlyMode {
+		w.loggerWrapper.GetLogger(userId).LogInfo("[%s] Global queue dispatch skipped by send-only mode: %s", userId, eventType)
+		return
+	}
+
 	w.loggerWrapper.GetLogger(userId).LogInfo("[%s] Starting sendToGlobalQueues for event: %s", userId, eventType)
 
 	// AMQP: AMQP_SPECIFIC_EVENTS tem prioridade sobre AMQP_GLOBAL_EVENTS
@@ -2398,9 +2435,9 @@ func (w whatsmeowService) UpdateInstanceSettings(instanceId string) error {
 	eventArray := strings.Split(instance.Events, ",")
 	var subscribedEvents []string
 
-	if len(eventArray) < 1 {
+	if strings.TrimSpace(instance.Events) == "" && !w.config.SendOnlyMode {
 		subscribedEvents = append(subscribedEvents, event_types.MESSAGE)
-	} else {
+	} else if strings.TrimSpace(instance.Events) != "" {
 		for _, arg := range eventArray {
 			if !event_types.IsEventType(arg) {
 				w.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] Message type discarded: %s", instanceId, arg)

@@ -61,6 +61,8 @@ type Config struct {
 	EventIgnoreStatus    bool
 	QrcodeMaxCount       int
 	CheckUserExists      bool
+	SendOnlyMode         bool
+	WhatsappFullSync     bool
 
 	// Logger configurations
 	LogMaxSize    int
@@ -68,7 +70,6 @@ type Config struct {
 	LogMaxAge     int
 	LogDirectory  string
 	LogCompress   bool
-
 }
 
 // EnsureDBExists connects to postgres (without the target database) and creates it if it doesn't exist.
@@ -238,7 +239,10 @@ func Load() *Config {
 
 	webhookFiles := os.Getenv(config_env.WEBHOOKFILES)
 	if webhookFiles == "" {
-		webhookFiles = "true"
+		webhookFiles = os.Getenv("WEBHOOKFILES")
+	}
+	if webhookFiles == "" {
+		webhookFiles = "false"
 	}
 
 	connectOnStartup := os.Getenv(config_env.CONNECT_ON_STARTUP)
@@ -279,6 +283,16 @@ func Load() *Config {
 
 	if checkUserExists == "" {
 		checkUserExists = "true"
+	}
+
+	sendOnlyMode := os.Getenv(config_env.SEND_ONLY_MODE)
+	if sendOnlyMode == "" {
+		sendOnlyMode = "true"
+	}
+
+	whatsappFullSync := os.Getenv(config_env.WHATSAPP_FULL_SYNC)
+	if whatsappFullSync == "" {
+		whatsappFullSync = "false"
 	}
 
 	// Convertendo para int com valores padrão caso estejam vazios
@@ -376,6 +390,8 @@ func Load() *Config {
 		EventIgnoreStatus:    eventIgnoreStatus == "true",
 		QrcodeMaxCount:       qrMaxCount,
 		CheckUserExists:      checkUserExists != "false", // Default true, set to false to disable
+		SendOnlyMode:         sendOnlyMode != "false",
+		WhatsappFullSync:     whatsappFullSync == "true",
 		AmqpGlobalEvents:     amqpGlobalEvents,
 		AmqpSpecificEvents:   amqpSpecificEvents,
 		NatsUrl:              natsUrl,
