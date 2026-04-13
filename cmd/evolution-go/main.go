@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -200,8 +200,6 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 	// NOVO: PollHandler usando PollService já inicializado no whatsmeowService (evita dupla inicialização)
 	pollHandler := poll_handler.NewPollHandler(whatsmeowService.GetPollService(), loggerWrapper)
 
-	telemetry := telemetry.NewTelemetryService()
-
 	r := gin.Default()
 
 	// CORS middleware — must be before everything else
@@ -218,7 +216,10 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 		c.Next()
 	})
 
-	r.Use(telemetry.TelemetryMiddleware())
+	if config.TelemetryEnabled {
+		telemetryService := telemetry.NewTelemetryService()
+		r.Use(telemetryService.TelemetryMiddleware())
+	}
 
 	r.Use(core.GateMiddleware(runtimeCtx))
 

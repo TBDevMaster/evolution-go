@@ -235,7 +235,8 @@ func (i instances) Connect(data *ConnectStruct, instance *instance_model.Instanc
 	}
 
 	// Verifica se a instância já está rodando
-	isInstanceRunning := i.clientPointer[instance.Id] != nil
+	client := i.clientPointer[instance.Id]
+	isInstanceRunning := client != nil
 
 	// Sincroniza as configurações na instância em execução (se já estiver conectada)
 	err = i.whatsmeowService.UpdateInstanceSettings(instance.Id)
@@ -248,6 +249,15 @@ func (i instances) Connect(data *ConnectStruct, instance *instance_model.Instanc
 	}
 
 	// Se a instância não estiver rodando, inicia uma nova
+	if isInstanceRunning && client != nil && !client.IsConnected() {
+		i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Runtime client exists but websocket is disconnected; restarting without requiring a new QR scan", instance.Id)
+		if err := i.whatsmeowService.ReconnectClient(instance.Id); err != nil {
+			i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to restart disconnected runtime client: %v", instance.Id, err)
+			return nil, "", "", err
+		}
+		return instance, instance.Jid, eventString, nil
+	}
+
 	if !isInstanceRunning {
 		i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Starting new client instance", instance.Id)
 
@@ -430,7 +440,7 @@ func (i instances) GetQr(instance *instance_model.Instance) (*QrcodeStruct, erro
 	client := i.clientPointer[instance.Id]
 
 	// Se não há cliente ou o cliente está logado, precisamos iniciar um novo cliente
-	if client == nil || client.IsLoggedIn() {
+	if client == nil {
 		if client != nil && client.IsLoggedIn() {
 			logger.LogInfo("[%s] Client is logged in, starting new instance for QR code", instance.Id)
 		} else {
@@ -471,6 +481,10 @@ func (i instances) GetQr(instance *instance_model.Instance) (*QrcodeStruct, erro
 	}
 
 	// Buscar instância atualizada do banco para pegar o QR code mais recente
+	if client != nil && client.IsLoggedIn() {
+		return nil, fmt.Errorf("session already logged in")
+	}
+
 	instance, err := i.instanceRepository.GetInstanceByID(instance.Id)
 	if err != nil {
 		return nil, err
@@ -507,9 +521,32 @@ func (i instances) GetQr(instance *instance_model.Instance) (*QrcodeStruct, erro
 }
 
 func (i instances) Pair(data *PairStruct, instance *instance_model.Instance) (*PairReturnStruct, error) {
-	code, err := i.clientPointer[instance.Id].PairPhone(context.Background(), data.Phone, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
+	logger := i.loggerWrapper.GetLogger(instance.Id)
+	client := i.clientPointer[instance.Id]
+
+	if client == nil || !client.IsConnected() {
+		logger.LogWarn("[%s] Pair requested without a connected websocket; restarting client first", instance.Id)
+		if err := i.whatsmeowService.ReconnectClient(instance.Id); err != nil {
+			logger.LogError("[%s] Failed to restart client before pairing: %v", instance.Id, err)
+			return nil, err
+		}
+
+		time.Sleep(3 * time.Second)
+		client = i.clientPointer[instance.Id]
+	}
+
+	if client == nil || !client.IsConnected() {
+		return nil, fmt.Errorf("client websocket not connected")
+	}
+
+	if client.IsLoggedIn() {
+		return nil, fmt.Errorf("session already logged in")
+	}
+
+	code, err := client.PairPhone(context.Background(), data.Phone, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
 	if err != nil {
-		i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] something went wrong calling pair phone", instance.Id)
+		logger.LogError("[%s] something went wrong calling pair phone: %v", instance.Id, err)
+		return nil, err
 	}
 
 	return &PairReturnStruct{PairingCode: code}, nil
@@ -523,7 +560,7 @@ func (i instances) GetAll() ([]*instance_model.Instance, error) {
 
 	for _, instance := range instances {
 		if client := i.clientPointer[instance.Id]; client != nil {
-			instance.Connected = client.IsLoggedIn()
+			instance.Connected = client.IsConnected() && client.IsLoggedIn()
 		} else {
 			instance.Connected = false
 		}
@@ -542,7 +579,7 @@ func (i instances) Info(instanceId string) (*instance_model.Instance, error) {
 
 	// Atualiza o status connected com base no estado real do cliente
 	if client := i.clientPointer[instance.Id]; client != nil {
-		instance.Connected = client.IsLoggedIn()
+		instance.Connected = client.IsConnected() && client.IsLoggedIn()
 	} else {
 		instance.Connected = false
 	}

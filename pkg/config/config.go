@@ -63,6 +63,7 @@ type Config struct {
 	CheckUserExists      bool
 	SendOnlyMode         bool
 	WhatsappFullSync     bool
+	TelemetryEnabled     bool
 
 	// Logger configurations
 	LogMaxSize    int
@@ -295,6 +296,11 @@ func Load() *Config {
 		whatsappFullSync = "false"
 	}
 
+	telemetryEnabled := os.Getenv(config_env.TELEMETRY_ENABLED)
+	if telemetryEnabled == "" {
+		telemetryEnabled = "false"
+	}
+
 	// Convertendo para int com valores padrão caso estejam vazios
 	major := 0
 	if whatsappVersionMajor != "" {
@@ -392,6 +398,7 @@ func Load() *Config {
 		CheckUserExists:      checkUserExists != "false", // Default true, set to false to disable
 		SendOnlyMode:         sendOnlyMode != "false",
 		WhatsappFullSync:     whatsappFullSync == "true",
+		TelemetryEnabled:     telemetryEnabled == "true",
 		AmqpGlobalEvents:     amqpGlobalEvents,
 		AmqpSpecificEvents:   amqpSpecificEvents,
 		NatsUrl:              natsUrl,
