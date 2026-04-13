@@ -82,10 +82,11 @@ type ConnectStruct struct {
 }
 
 type StatusStruct struct {
-	Connected bool
-	LoggedIn  bool
-	myJid     *types.JID
-	Name      string
+	Connected          bool
+	LoggedIn           bool
+	WebsocketConnected bool
+	myJid              *types.JID
+	Name               string
 }
 
 type QrcodeStruct struct {
@@ -292,11 +293,6 @@ func (i instances) Connect(data *ConnectStruct, instance *instance_model.Instanc
 }
 
 func (i instances) Reconnect(instance *instance_model.Instance) error {
-	_, err := i.ensureClientConnected(instance.Id)
-	if err != nil {
-		return err
-	}
-
 	return i.whatsmeowService.ReconnectClient(instance.Id)
 }
 
@@ -376,26 +372,54 @@ func (i instances) Logout(instance *instance_model.Instance) (*instance_model.In
 }
 
 func (i instances) Status(instance *instance_model.Instance) (*StatusStruct, error) {
-	client, err := i.ensureClientConnected(instance.Id)
-	if err != nil {
-		return nil, err
+	logger := i.loggerWrapper.GetLogger(instance.Id)
+	client := i.clientPointer[instance.Id]
+
+	if client == nil {
+		logger.LogWarn("[%s] Status requested without runtime client; marking instance as disconnected", instance.Id)
+		if instance.Connected {
+			if err := i.instanceRepository.UpdateConnected(instance.Id, false, "status check: runtime client not found"); err != nil {
+				logger.LogWarn("[%s] Failed to sync missing client status: %v", instance.Id, err)
+			}
+		}
+		return &StatusStruct{
+			Connected:          false,
+			LoggedIn:           false,
+			WebsocketConnected: false,
+		}, nil
 	}
 
 	isConnected := client.IsConnected()
 	isLoggedIn := client.IsLoggedIn()
+	isSessionReady := isConnected && isLoggedIn
 
 	var myJid *types.JID
 	var name string
-	if isLoggedIn {
+	if isSessionReady {
 		myJid = client.Store.ID
 		name = client.Store.PushName
 	}
 
 	status := &StatusStruct{
-		Connected: isConnected,
-		LoggedIn:  isLoggedIn,
-		myJid:     myJid,
-		Name:      name,
+		Connected:          isSessionReady,
+		LoggedIn:           isLoggedIn,
+		WebsocketConnected: isConnected,
+		myJid:              myJid,
+		Name:               name,
+	}
+
+	if instance.Connected != isSessionReady {
+		disconnectReason := ""
+		if !isConnected && isLoggedIn {
+			disconnectReason = "status check: session stored but websocket disconnected"
+		} else if isConnected && !isLoggedIn {
+			disconnectReason = "status check: websocket connected but session not logged in"
+		} else if !isConnected {
+			disconnectReason = "status check: websocket disconnected"
+		}
+		if err := i.instanceRepository.UpdateConnected(instance.Id, isSessionReady, disconnectReason); err != nil {
+			i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Failed to sync status after status check: %v", instance.Id, err)
+		}
 	}
 
 	return status, nil
@@ -430,8 +454,20 @@ func (i instances) GetQr(instance *instance_model.Instance) (*QrcodeStruct, erro
 			return nil, fmt.Errorf("session already logged in")
 		}
 	} else if !client.IsConnected() {
-		// Se o cliente existe mas não está conectado, pode estar aguardando QR code
-		logger.LogInfo("[%s] Client exists but not connected, checking for existing QR code", instance.Id)
+		// Se o cliente existe mas perdeu o websocket, reinicia antes de procurar QR.
+		logger.LogInfo("[%s] Client exists but is disconnected, restarting before checking QR code", instance.Id)
+		if err := i.whatsmeowService.ReconnectClient(instance.Id); err != nil {
+			logger.LogError("[%s] Failed to restart disconnected client for QR code: %v", instance.Id, err)
+			return nil, fmt.Errorf("failed to restart instance: %w", err)
+		}
+
+		logger.LogInfo("[%s] Waiting for QR code generation after restart...", instance.Id)
+		time.Sleep(3 * time.Second)
+
+		client = i.clientPointer[instance.Id]
+		if client != nil && client.IsLoggedIn() {
+			return nil, fmt.Errorf("session already logged in")
+		}
 	}
 
 	// Buscar instância atualizada do banco para pegar o QR code mais recente

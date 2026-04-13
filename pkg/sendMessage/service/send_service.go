@@ -234,12 +234,12 @@ type CarouselCardStruct struct {
 }
 
 type CarouselStruct struct {
-	Number    string             `json:"number"`
-	Body      string             `json:"body,omitempty"`
-	Footer    string             `json:"footer,omitempty"`
-	Delay     int32              `json:"delay"`
-	FormatJid *bool              `json:"formatJid,omitempty"`
-	Quoted    QuotedStruct       `json:"quoted"`
+	Number    string               `json:"number"`
+	Body      string               `json:"body,omitempty"`
+	Footer    string               `json:"footer,omitempty"`
+	Delay     int32                `json:"delay"`
+	FormatJid *bool                `json:"formatJid,omitempty"`
+	Quoted    QuotedStruct         `json:"quoted"`
 	Cards     []CarouselCardStruct `json:"cards"`
 }
 
@@ -265,26 +265,29 @@ func (s *sendService) ensureClientConnected(instanceId string) (*whatsmeow.Clien
 		time.Sleep(2 * time.Second)
 
 		client = s.clientPointer[instanceId]
-		s.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Checking new client - Exists: %v, Connected: %v",
+		s.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Checking new client - Exists: %v, Connected: %v, LoggedIn: %v",
 			instanceId,
 			client != nil,
-			client != nil && client.IsConnected())
+			client != nil && client.IsConnected(),
+			client != nil && client.IsLoggedIn())
 
-		if client == nil || !client.IsConnected() {
-			s.loggerWrapper.GetLogger(instanceId).LogError("[%s] New client validation failed - Exists: %v, Connected: %v",
+		if client == nil || !client.IsConnected() || !client.IsLoggedIn() {
+			s.loggerWrapper.GetLogger(instanceId).LogError("[%s] New client validation failed - Exists: %v, Connected: %v, LoggedIn: %v",
 				instanceId,
 				client != nil,
-				client != nil && client.IsConnected())
+				client != nil && client.IsConnected(),
+				client != nil && client.IsLoggedIn())
 			return nil, errors.New("no active session found")
 		}
-	} else if !client.IsConnected() {
-		s.loggerWrapper.GetLogger(instanceId).LogError("[%s] Existing client is disconnected - Connected status: %v",
+	} else if !client.IsConnected() || !client.IsLoggedIn() {
+		s.loggerWrapper.GetLogger(instanceId).LogError("[%s] Existing client is not ready - Connected: %v, LoggedIn: %v",
 			instanceId,
-			client.IsConnected())
+			client.IsConnected(),
+			client.IsLoggedIn())
 		return nil, errors.New("client disconnected")
 	}
 
-	s.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Client successfully validated - Connected: %v", instanceId, client.IsConnected())
+	s.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Client successfully validated - Connected: %v, LoggedIn: %v", instanceId, client.IsConnected(), client.IsLoggedIn())
 	return client, nil
 }
 
