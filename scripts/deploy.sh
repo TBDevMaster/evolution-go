@@ -10,7 +10,14 @@ git -C "$REPO_ROOT" reset --hard origin/main
 git -C "$REPO_ROOT" submodule sync --recursive
 git -C "$REPO_ROOT" submodule update --init --recursive
 
-docker build -t evolution-go-recebafacil:main "$REPO_ROOT"
+VERSION="$(tr -d '[:space:]' < "$REPO_ROOT/VERSION")"
+GIT_COMMIT="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+
+docker build \
+  --build-arg VERSION="$VERSION" \
+  --build-arg GIT_COMMIT="$GIT_COMMIT" \
+  -t evolution-go-recebafacil:main \
+  "$REPO_ROOT"
 
 cd "$COMPOSE_DIR"
 docker compose up -d api

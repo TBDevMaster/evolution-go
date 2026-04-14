@@ -6,7 +6,8 @@ MAIN_PATH=cmd/evolution-go/main.go
 BUILD_DIR=build
 GO=go
 VERSION=$(shell grep -om1 "v[0-9].*" CHANGELOG.md)
-LDFLAGS=-ldflags "-X main.version=$(VERSION)"
+GIT_COMMIT=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+LDFLAGS=-ldflags "-X main.version=$(VERSION) -X main.gitCommit=$(GIT_COMMIT)"
 GOFLAGS=-v
 
 # Cores para output
@@ -160,7 +161,7 @@ migrate-down: ## Reverte migrations do banco de dados
 
 docker-build: ## Build da imagem Docker
 	@echo "$(GREEN)🐳 Construindo imagem Docker...$(NC)"
-	docker build --build-arg VERSION=$(VERSION) -t $(APP_NAME):latest .
+	docker build --build-arg VERSION=$(VERSION) --build-arg GIT_COMMIT=$(GIT_COMMIT) -t $(APP_NAME):latest .
 	@echo "$(GREEN)✅ Imagem Docker construída$(NC)"
 
 docker-run: ## Roda container Docker

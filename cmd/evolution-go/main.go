@@ -69,6 +69,7 @@ import (
 var devMode = flag.Bool("dev", false, "Enable development mode")
 
 var version = "0.0.0"
+var gitCommit = "unknown"
 
 func init() {
 	// ldflags -X main.version= sets this at compile time.
@@ -226,6 +227,13 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 	// License routes (always accessible, even without license)
 	core.LicenseRoutes(r, runtimeCtx)
 
+	r.GET("/server/version", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"version": version,
+			"commit":  gitCommit,
+		})
+	})
+
 	routes.NewRouter(
 		auth_middleware.NewMiddleware(config, instanceService),
 		instance_handler.NewInstanceHandler(instanceService, config),
@@ -341,7 +349,7 @@ func main() {
 
 	cfg := config.Load()
 
-	logger.LogInfo("Starting Evolution GO version %s", version)
+	logger.LogInfo("Starting Evolution GO version %s (%s)", version, gitCommit)
 
 	startTime := time.Now()
 

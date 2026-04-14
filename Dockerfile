@@ -17,7 +17,8 @@ RUN go mod download
 COPY . .
 
 ARG VERSION=dev
-RUN CGO_ENABLED=1 go build -ldflags "-X main.version=${VERSION}" -o server ./cmd/evolution-go
+ARG GIT_COMMIT=unknown
+RUN CGO_ENABLED=1 go build -ldflags "-X main.version=${VERSION} -X main.gitCommit=${GIT_COMMIT}" -o server ./cmd/evolution-go
 
 FROM alpine:3.19.1 AS final
 

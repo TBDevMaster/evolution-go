@@ -541,7 +541,7 @@ func GateMiddleware(rc *RuntimeContext) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
 
-		if path == "/health" || path == "/server/ok" || path == "/favicon.ico" ||
+		if path == "/health" || path == "/server/ok" || path == "/server/version" || path == "/favicon.ico" ||
 			path == "/license/status" || path == "/license/register" || path == "/license/activate" ||
 			strings.HasPrefix(path, "/manager") || strings.HasPrefix(path, "/assets") ||
 			strings.HasPrefix(path, "/swagger") || path == "/ws" ||
