@@ -63,6 +63,105 @@ type ProxyConfig struct {
 	Host     string `json:"host"`
 }
 
+func (i instances) hasGlobalProxyConfig() bool {
+	return i.config.ProxyHost != "" && i.config.ProxyPort != "" && i.config.ProxyUsername != "" && i.config.ProxyPassword != ""
+}
+
+func (i instances) ensureProxyConfig(instance *instance_model.Instance) (*ProxyConfig, bool, error) {
+	if instance == nil {
+		return nil, false, fmt.Errorf("instance not found")
+	}
+
+	if instance.Proxy != "" {
+		var proxyConfig ProxyConfig
+		if err := json.Unmarshal([]byte(instance.Proxy), &proxyConfig); err != nil {
+			i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] error unmarshalling proxy config: %v", instance.Id, err)
+			return nil, false, fmt.Errorf("invalid proxy configuration")
+		}
+
+		if proxyConfig.Host == "" && i.config.ProxyHost != "" {
+			proxyConfig.Host = i.config.ProxyHost
+		}
+		if proxyConfig.Port == "" && i.config.ProxyPort != "" {
+			proxyConfig.Port = i.config.ProxyPort
+		}
+		if proxyConfig.Protocol == "" {
+			proxyConfig.Protocol = utils.NormalizeProxyProtocol(i.config.ProxyProtocol, proxyConfig.Port)
+		} else {
+			proxyConfig.Protocol = utils.NormalizeProxyProtocol(proxyConfig.Protocol, proxyConfig.Port)
+		}
+		if proxyConfig.Username == "" && i.config.ProxyUsername != "" {
+			proxyConfig.Username = i.config.ProxyUsername
+		}
+		if proxyConfig.Password == "" && i.config.ProxyPassword != "" {
+			proxyConfig.Password = i.config.ProxyPassword
+		}
+
+		proxyJSON, err := json.Marshal(&proxyConfig)
+		if err != nil {
+			i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to marshal hydrated proxy config: %v", instance.Id, err)
+			return nil, false, fmt.Errorf("failed to marshal proxy configuration")
+		}
+		if instance.Proxy != string(proxyJSON) {
+			instance.Proxy = string(proxyJSON)
+			if err := i.instanceRepository.UpdateProxy(instance.Id, instance.Proxy); err != nil {
+				i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to persist hydrated proxy config: %v", instance.Id, err)
+				return nil, false, fmt.Errorf("failed to persist proxy configuration")
+			}
+		}
+
+		return &proxyConfig, proxyConfig.Host != "" && proxyConfig.Port != "", nil
+	}
+
+	if !i.hasGlobalProxyConfig() {
+		return nil, false, nil
+	}
+
+	proxyConfig := &ProxyConfig{
+		Protocol: utils.NormalizeProxyProtocol(i.config.ProxyProtocol, i.config.ProxyPort),
+		Host:     i.config.ProxyHost,
+		Port:     i.config.ProxyPort,
+		Username: i.config.ProxyUsername,
+		Password: i.config.ProxyPassword,
+	}
+
+	proxyJSON, err := json.Marshal(proxyConfig)
+	if err != nil {
+		i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to marshal fallback proxy config: %v", instance.Id, err)
+		return nil, false, fmt.Errorf("failed to marshal proxy configuration")
+	}
+
+	instance.Proxy = string(proxyJSON)
+	if err := i.instanceRepository.UpdateProxy(instance.Id, instance.Proxy); err != nil {
+		i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to persist fallback proxy config: %v", instance.Id, err)
+		return nil, false, fmt.Errorf("failed to persist proxy configuration")
+	}
+
+	return proxyConfig, true, nil
+}
+
+func maskProxyConfig(proxy string) string {
+	if proxy == "" {
+		return ""
+	}
+
+	var proxyConfig ProxyConfig
+	if err := json.Unmarshal([]byte(proxy), &proxyConfig); err != nil {
+		return proxy
+	}
+
+	if proxyConfig.Password != "" {
+		proxyConfig.Password = "***"
+	}
+
+	masked, err := json.Marshal(proxyConfig)
+	if err != nil {
+		return ""
+	}
+
+	return string(masked)
+}
+
 type CreateStruct struct {
 	InstanceId       string                           `json:"instanceId"`
 	Name             string                           `json:"name"`
@@ -565,7 +664,7 @@ func (i instances) GetAll() ([]*instance_model.Instance, error) {
 			instance.Connected = false
 		}
 
-		instance.Proxy = ""
+		instance.Proxy = maskProxyConfig(instance.Proxy)
 	}
 
 	return instances, nil
@@ -584,7 +683,7 @@ func (i instances) Info(instanceId string) (*instance_model.Instance, error) {
 		instance.Connected = false
 	}
 
-	instance.Proxy = ""
+	instance.Proxy = maskProxyConfig(instance.Proxy)
 
 	return instance, nil
 }
@@ -705,72 +804,58 @@ func (i instances) RemoveProxy(id string) error {
 }
 
 func (i instances) ForceReconnect(instanceId string, number string) error {
-	if i.clientPointer[instanceId].IsConnected() && i.clientPointer[instanceId].IsLoggedIn() {
-		return fmt.Errorf("client already connected")
-	}
-
-	err := i.whatsmeowService.ForceUpdateJid(instanceId, number)
-	if err != nil {
-		return err
-	}
-
 	instance, err := i.instanceRepository.GetInstanceByID(instanceId)
 	if err != nil {
-		return err
+		i.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] Force reconnect failed: instance not found: %v", instanceId, err)
+		return fmt.Errorf("instance not found")
 	}
 
-	subscribedEvents := strings.Split(instance.Events, ",")
-
-	i.killChannel[instance.Id] = make(chan bool)
-
-	clientData := &whatsmeow_service.ClientData{
-		Instance:      instance,
-		Subscriptions: subscribedEvents,
-		Phone:         "",
-		IsProxy:       false,
+	if client := i.clientPointer[instance.Id]; client != nil {
+		if client.IsConnected() && client.IsLoggedIn() {
+			i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Force reconnect requested for an already connected client; restarting runtime client", instance.Id)
+		} else {
+			i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Force reconnect requested with runtime client present but not ready (connected=%t loggedIn=%t)", instance.Id, client.IsConnected(), client.IsLoggedIn())
+		}
+	} else {
+		i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Force reconnect requested without runtime client; trying persisted session", instance.Id)
 	}
 
-	if instance.Proxy != "" || i.config.ProxyHost != "" {
-		var proxyConfig ProxyConfig
-		err := json.Unmarshal([]byte(instance.Proxy), &proxyConfig)
-		if err != nil {
-			i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] error unmarshalling proxy config: %v", instance.Id, err)
+	if strings.TrimSpace(number) != "" {
+		i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Force reconnect received number hint; trying to refresh stored JID", instance.Id)
+		if err := i.whatsmeowService.ForceUpdateJid(instance.Id, number); err != nil {
+			i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Force reconnect could not refresh JID from number hint: %v", instance.Id, err)
 			return err
 		}
 
-		if proxyConfig.Host != "" || i.config.ProxyHost != "" {
-			clientData.IsProxy = true
+		instance, err = i.instanceRepository.GetInstanceByID(instance.Id)
+		if err != nil {
+			i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Force reconnect failed after JID refresh: instance not found: %v", instance.Id, err)
+			return fmt.Errorf("instance not found")
 		}
 	}
 
-	if i.clientPointer[instance.Id] != nil {
-		client := i.clientPointer[instance.Id]
-		client.Disconnect()
-
-		select {
-		case i.killChannel[instance.Id] <- true:
-		case <-time.After(5 * time.Second):
-		}
-
-		delete(i.clientPointer, instance.Id)
-		delete(i.killChannel, instance.Id)
+	if instance.Jid == "" && strings.TrimSpace(number) == "" {
+		i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Force reconnect has no persisted JID and no number hint; relogin is required", instance.Id)
+		return fmt.Errorf("session not available for reconnect")
 	}
 
-	go i.whatsmeowService.StartClient(clientData)
-
-	time.Sleep(2 * time.Second)
-
-	if i.clientPointer[instance.Id] != nil {
-		if !i.clientPointer[instance.Id].IsConnected() {
-			return fmt.Errorf("failed to connect")
-		}
-
-		if !i.clientPointer[instance.Id].IsLoggedIn() {
-			return fmt.Errorf("failed to login")
-		}
+	proxyConfig, hasProxy, err := i.ensureProxyConfig(instance)
+	if err != nil {
+		return err
+	}
+	if hasProxy {
+		i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Proxy configuration loaded for reconnect: %s://%s:%s", instance.Id, proxyConfig.Protocol, proxyConfig.Host, proxyConfig.Port)
 	} else {
-		return fmt.Errorf("failed to connect")
+		i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Proxy configuration not found for reconnect; continuing without proxy", instance.Id)
 	}
+
+	i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Force reconnect attempt started", instance.Id)
+	if err := i.whatsmeowService.ReconnectClient(instance.Id); err != nil {
+		i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Force reconnect failed to start: %v", instance.Id, err)
+		return fmt.Errorf("runtime not available: %v", err)
+	}
+
+	i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Force reconnect attempt dispatched", instance.Id)
 
 	return nil
 }

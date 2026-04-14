@@ -1,6 +1,8 @@
 package instance_handler
 
 import (
+	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -451,9 +453,9 @@ func (i *instanceHandler) SetProxy(ctx *gin.Context) {
 
 	responseData := gin.H{
 		"protocol": utils.NormalizeProxyProtocol(data.Protocol, data.Port),
-		"host":    data.Host,
-		"port":    data.Port,
-		"hasAuth": data.Username != "" && data.Password != "",
+		"host":     data.Host,
+		"port":     data.Port,
+		"hasAuth":  data.Username != "" && data.Password != "",
 	}
 
 	ctx.JSON(http.StatusOK, gin.H{"message": "success", "data": responseData})
@@ -507,28 +509,25 @@ func (i *instanceHandler) ForceReconnect(ctx *gin.Context) {
 		return
 	}
 
-	var data *instance_service.ForceReconnectStruct
-	err := ctx.ShouldBindBodyWithJSON(&data)
-	if err != nil {
+	data := &instance_service.ForceReconnectStruct{}
+	err := ctx.ShouldBindBodyWithJSON(data)
+	if err != nil && !errors.Is(err, io.EOF) {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	var number string
-	if data.Number == "" {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": "number is required"})
-		return
+	if data != nil {
+		number = data.Number
 	}
-
-	number = data.Number
 
 	err = i.instanceService.ForceReconnect(instanceId, number)
 	if err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	ctx.JSON(http.StatusOK, gin.H{"message": "success"})
+	ctx.JSON(http.StatusOK, gin.H{"message": "success", "data": gin.H{"status": "reconnect attempt started"}})
 }
 
 type GetLogsQuery struct {

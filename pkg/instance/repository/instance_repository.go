@@ -68,9 +68,8 @@ func (i *instanceRepository) GetInstanceByName(name string) (*instance_model.Ins
 }
 
 func (i *instanceRepository) GetInstanceByID(instanceId string) (*instance_model.Instance, error) {
-	// Valida o formato do UUID
 	if _, err := uuid.Parse(instanceId); err != nil {
-		return nil, fmt.Errorf("invalid UUID format: %v", err)
+		return i.GetInstanceByName(instanceId)
 	}
 
 	var instance instance_model.Instance
