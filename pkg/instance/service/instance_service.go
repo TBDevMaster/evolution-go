@@ -365,7 +365,7 @@ func (i instances) Connect(data *ConnectStruct, instance *instance_model.Instanc
 		return nil, "", "", err
 	}
 
-	err := i.instanceRepository.Update(instance)
+	err = i.instanceRepository.Update(instance)
 	if err != nil {
 		i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Error updating instance: %s", instance.Id, err)
 		return nil, "", "", err
