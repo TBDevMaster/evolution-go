@@ -1,4 +1,4 @@
-name: Build and Deploy Evolution Go
+name: Deploy Evolution Go
 
 on:
   push:
@@ -8,94 +8,95 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
-  group: evolution-go-main
-  cancel-in-progress: true
+  group: deploy-evolution-go-main
+  cancel-in-progress: false
 
 jobs:
-  build_and_push:
-    name: Build and push image
+  deploy:
+    name: Deploy VPS
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout repository with submodules
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: recursive
+      - name: Prepare SSH key
+        shell: bash
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
 
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          raw_key = os.environ["VPS_SSH_KEY"]
+          normalized_key = raw_key.replace("\\n", "\n").replace("\r", "")
+          if not normalized_key.endswith("\n"):
+              normalized_key += "\n"
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/tbdevmaster/evolution-go-recebafacil
-          tags: |
-            type=raw,value=main
-            type=sha,format=long,prefix=sha-
+          key_path = Path.home() / ".ssh" / "id_deploy"
+          key_path.write_text(normalized_key, encoding="utf-8")
+          PY
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keygen -y -f ~/.ssh/id_deploy >/dev/null
 
-  deploy_vps:
-    name: Deploy on VPS
-    runs-on: ubuntu-latest
-    needs: build_and_push
+      - name: Run remote deploy script with retry
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          set -euo pipefail
 
-    steps:
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_PORT }}
-          script_stop: true
-          script: |
+          run_remote_deploy() {
+            ssh \
+              -i ~/.ssh/id_deploy \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -o ConnectTimeout=90 \
+              -o BatchMode=yes \
+              -p "$VPS_PORT" \
+              "$VPS_USER@$VPS_HOST" '
+                set -euo pipefail
+                REPO_DIR="/home/deploy/apps/evolution-go"
+
+                if [ ! -d "$REPO_DIR/.git" ]; then
+                  mkdir -p /home/deploy/apps
+                  git clone --recursive https://github.com/TBDevMaster/evolution-go.git "$REPO_DIR"
+                fi
+
+                cd "$REPO_DIR"
+                git remote set-url origin https://github.com/TBDevMaster/evolution-go.git
+                chmod 750 scripts/deploy.sh
+                bash scripts/deploy.sh
+              '
+          }
+
+          for attempt in 1 2 3; do
+            echo "==== Deploy attempt $attempt/3 ===="
+            set +e
+            run_remote_deploy
+            status=$?
             set -e
 
-            echo "${{ secrets.GHCR_READ_TOKEN }}" | docker login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
+            if [ "$status" -eq 0 ]; then
+              echo "==== Deploy successful ===="
+              exit 0
+            fi
 
-            cd /docker/evolution-go-qtd2
+            echo "==== Deploy failed with exit code $status ===="
 
-            docker compose pull api
-            docker compose up -d api
-
-            echo "== container status =="
-            docker ps --filter name=evolution-go-qtd2-api-1 --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
-
-            echo "== waiting for api =="
-            ATTEMPTS=0
-            until [ $ATTEMPTS -ge 20 ]
-            do
-              if docker exec evolution-go-qtd2-api-1 sh -c 'wget -qO- http://127.0.0.1:4000 >/dev/null 2>&1 || nc -z 127.0.0.1 4000 >/dev/null 2>&1'; then
-                break
-              fi
-              ATTEMPTS=$((ATTEMPTS+1))
-              sleep 3
-            done
-
-            echo "== health check /instance/all =="
-            set -a
-            . ./.env
-            set +a
-            curl -fsS -H "apikey: $API_KEY" http://127.0.0.1:4000/instance/all >/dev/null
-
-            echo "== recent logs =="
-            docker logs --tail 80 evolution-go-qtd2-api-1 2>&1 | sed -E 's/([A-Za-z0-9_\-]{20,})/[REDACTED]/g; s/(Bearer )[A-Za-z0-9._-]+/\1[REDACTED]/g; s/("token"\s*:\s*")[^"]+/\1[REDACTED]/g; s/("api[_-]?key"\s*:\s*")[^"]+/\1[REDACTED]/Ig; s/([?&]token=)[^& ]+/\1[REDACTED]/g'
+            if [ "$attempt" -lt 3 ]; then
+              backoff=$((20 * attempt))
+              echo "Retrying in ${backoff}s..."
+              sleep "$backoff"
+            else
+              echo "All deployment attempts failed."
+              exit "$status"
+            fi
+          done
