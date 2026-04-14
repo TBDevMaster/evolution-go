@@ -11,9 +11,6 @@ git -C "$REPO_ROOT" submodule update --init --recursive
 
 docker build -t evolution-go-recebafacil:main "$REPO_ROOT"
 
-sed -i 's|image: ghcr.io/tbdevmaster/evolution-go-recebafacil:main|image: evolution-go-recebafacil:main|g' "$COMPOSE_DIR/docker-compose.yml"
-sed -i 's|image: evolution-go-recebafacil:2026-04-13|image: evolution-go-recebafacil:main|g' "$COMPOSE_DIR/docker-compose.yml"
-
 cd "$COMPOSE_DIR"
 docker compose up -d api
 
