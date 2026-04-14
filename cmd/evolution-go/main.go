@@ -253,6 +253,7 @@ func setupRouter(db *gorm.DB, authDB *sql.DB, sqliteDB *sql.DB, config *config.C
 	if config.ConnectOnStartup {
 		go whatsmeowService.ConnectOnStartup(config.ClientName)
 	}
+	go whatsmeowService.StartConnectionWatchdog(config.ClientName)
 
 	r.GET("/ws", func(c *gin.Context) {
 		token := c.Query("token")

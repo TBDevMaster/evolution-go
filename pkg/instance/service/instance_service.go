@@ -72,9 +72,10 @@ func (i instances) ensureProxyConfig(instance *instance_model.Instance) (*ProxyC
 		return nil, false, fmt.Errorf("instance not found")
 	}
 
-	if instance.Proxy != "" {
+	storedProxy := strings.TrimSpace(instance.Proxy)
+	if storedProxy != "" && storedProxy != "null" {
 		var proxyConfig ProxyConfig
-		if err := json.Unmarshal([]byte(instance.Proxy), &proxyConfig); err != nil {
+		if err := json.Unmarshal([]byte(storedProxy), &proxyConfig); err != nil {
 			i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] error unmarshalling proxy config: %v", instance.Id, err)
 			return nil, false, fmt.Errorf("invalid proxy configuration")
 		}
@@ -97,6 +98,10 @@ func (i instances) ensureProxyConfig(instance *instance_model.Instance) (*ProxyC
 			proxyConfig.Password = i.config.ProxyPassword
 		}
 
+		if proxyConfig.Host == "" || proxyConfig.Port == "" {
+			return &proxyConfig, false, nil
+		}
+
 		proxyJSON, err := json.Marshal(&proxyConfig)
 		if err != nil {
 			i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to marshal hydrated proxy config: %v", instance.Id, err)
@@ -111,6 +116,10 @@ func (i instances) ensureProxyConfig(instance *instance_model.Instance) (*ProxyC
 		}
 
 		return &proxyConfig, proxyConfig.Host != "" && proxyConfig.Port != "", nil
+	}
+
+	if storedProxy == "null" {
+		instance.Proxy = ""
 	}
 
 	if !i.hasGlobalProxyConfig() {
@@ -138,6 +147,26 @@ func (i instances) ensureProxyConfig(instance *instance_model.Instance) (*ProxyC
 	}
 
 	return proxyConfig, true, nil
+}
+
+func (i instances) ensureProxyConfigForFlow(instance *instance_model.Instance, flow string) (*ProxyConfig, bool, error) {
+	if instance == nil {
+		return nil, false, fmt.Errorf("instance not found")
+	}
+
+	proxyConfig, hasProxy, err := i.ensureProxyConfig(instance)
+	if err != nil {
+		i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to load proxy configuration for %s: %v", instance.Id, flow, err)
+		return nil, false, err
+	}
+
+	if hasProxy {
+		i.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Proxy configuration loaded for %s: %s://%s:%s", instance.Id, flow, proxyConfig.Protocol, proxyConfig.Host, proxyConfig.Port)
+	} else {
+		i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Proxy configuration not found for %s; continuing without proxy", instance.Id, flow)
+	}
+
+	return proxyConfig, hasProxy, nil
 }
 
 func maskProxyConfig(proxy string) string {
@@ -259,9 +288,13 @@ func (i instances) Create(data *CreateStruct) (*instance_model.Instance, error) 
 		data.Proxy.Protocol = utils.NormalizeProxyProtocol(data.Proxy.Protocol, data.Proxy.Port)
 	}
 
-	proxyJson, err := json.Marshal(data.Proxy)
-	if err != nil {
-		return nil, err
+	proxyPayload := ""
+	if data.Proxy != nil {
+		proxyJson, err := json.Marshal(data.Proxy)
+		if err != nil {
+			return nil, err
+		}
+		proxyPayload = string(proxyJson)
 	}
 
 	findInstance, _ := i.instanceRepository.GetInstanceByName(data.Name)
@@ -275,7 +308,7 @@ func (i instances) Create(data *CreateStruct) (*instance_model.Instance, error) 
 		Name:       data.Name,
 		Token:      data.Token,
 		OsName:     i.config.OsName,
-		Proxy:      string(proxyJson),
+		Proxy:      proxyPayload,
 		Connected:  false,
 		ClientName: i.config.ClientName,
 	}
@@ -327,6 +360,11 @@ func (i instances) Connect(data *ConnectStruct, instance *instance_model.Instanc
 	instance.NatsEnable = data.NatsEnable
 	instance.WebSocketEnable = data.WebSocketEnable
 
+	_, hasProxy, err := i.ensureProxyConfigForFlow(instance, "connect")
+	if err != nil {
+		return nil, "", "", err
+	}
+
 	err := i.instanceRepository.Update(instance)
 	if err != nil {
 		i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Error updating instance: %s", instance.Id, err)
@@ -350,6 +388,9 @@ func (i instances) Connect(data *ConnectStruct, instance *instance_model.Instanc
 	// Se a instância não estiver rodando, inicia uma nova
 	if isInstanceRunning && client != nil && !client.IsConnected() {
 		i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Runtime client exists but websocket is disconnected; restarting without requiring a new QR scan", instance.Id)
+		if _, _, err := i.ensureProxyConfigForFlow(instance, "connect-restart"); err != nil {
+			return nil, "", "", err
+		}
 		if err := i.whatsmeowService.ReconnectClient(instance.Id); err != nil {
 			i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] Failed to restart disconnected runtime client: %v", instance.Id, err)
 			return nil, "", "", err
@@ -369,18 +410,7 @@ func (i instances) Connect(data *ConnectStruct, instance *instance_model.Instanc
 			IsProxy:       false,
 		}
 
-		if instance.Proxy != "" || i.config.ProxyHost != "" {
-			var proxyConfig ProxyConfig
-			err := json.Unmarshal([]byte(instance.Proxy), &proxyConfig)
-			if err != nil {
-				i.loggerWrapper.GetLogger(instance.Id).LogError("[%s] error unmarshalling proxy config: %v", instance.Id, err)
-				return nil, "", "", err
-			}
-
-			if proxyConfig.Host != "" || i.config.ProxyHost != "" {
-				clientData.IsProxy = true
-			}
-		}
+		clientData.IsProxy = hasProxy
 
 		go i.whatsmeowService.StartClient(clientData)
 	} else {
@@ -402,7 +432,26 @@ func (i instances) Connect(data *ConnectStruct, instance *instance_model.Instanc
 }
 
 func (i instances) Reconnect(instance *instance_model.Instance) error {
-	return i.whatsmeowService.ReconnectClient(instance.Id)
+	if instance == nil {
+		return fmt.Errorf("instance not found")
+	}
+
+	storedInstance, err := i.instanceRepository.GetInstanceByID(instance.Id)
+	if err != nil {
+		i.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Reconnect failed: instance not found: %v", instance.Id, err)
+		return fmt.Errorf("instance not found")
+	}
+
+	if _, _, err := i.ensureProxyConfigForFlow(storedInstance, "reconnect"); err != nil {
+		return err
+	}
+
+	if storedInstance.Jid == "" {
+		i.loggerWrapper.GetLogger(storedInstance.Id).LogWarn("[%s] Reconnect requested without persisted JID; QR/login may be required", storedInstance.Id)
+	}
+
+	i.loggerWrapper.GetLogger(storedInstance.Id).LogInfo("[%s] Reconnect attempt started", storedInstance.Id)
+	return i.whatsmeowService.ReconnectClient(storedInstance.Id)
 }
 
 func (i instances) Disconnect(instance *instance_model.Instance) (*instance_model.Instance, error) {
@@ -535,6 +584,10 @@ func (i instances) Status(instance *instance_model.Instance) (*StatusStruct, err
 }
 
 func (i instances) GetQr(instance *instance_model.Instance) (*QrcodeStruct, error) {
+	if _, _, err := i.ensureProxyConfigForFlow(instance, "qr"); err != nil {
+		return nil, err
+	}
+
 	logger := i.loggerWrapper.GetLogger(instance.Id)
 	client := i.clientPointer[instance.Id]
 
@@ -565,6 +618,9 @@ func (i instances) GetQr(instance *instance_model.Instance) (*QrcodeStruct, erro
 	} else if !client.IsConnected() {
 		// Se o cliente existe mas perdeu o websocket, reinicia antes de procurar QR.
 		logger.LogInfo("[%s] Client exists but is disconnected, restarting before checking QR code", instance.Id)
+		if _, _, err := i.ensureProxyConfigForFlow(instance, "qr-restart"); err != nil {
+			return nil, err
+		}
 		if err := i.whatsmeowService.ReconnectClient(instance.Id); err != nil {
 			logger.LogError("[%s] Failed to restart disconnected client for QR code: %v", instance.Id, err)
 			return nil, fmt.Errorf("failed to restart instance: %w", err)
@@ -623,8 +679,15 @@ func (i instances) Pair(data *PairStruct, instance *instance_model.Instance) (*P
 	logger := i.loggerWrapper.GetLogger(instance.Id)
 	client := i.clientPointer[instance.Id]
 
+	if _, _, err := i.ensureProxyConfigForFlow(instance, "pair"); err != nil {
+		return nil, err
+	}
+
 	if client == nil || !client.IsConnected() {
 		logger.LogWarn("[%s] Pair requested without a connected websocket; restarting client first", instance.Id)
+		if _, _, err := i.ensureProxyConfigForFlow(instance, "pair-restart"); err != nil {
+			return nil, err
+		}
 		if err := i.whatsmeowService.ReconnectClient(instance.Id); err != nil {
 			logger.LogError("[%s] Failed to restart client before pairing: %v", instance.Id, err)
 			return nil, err
@@ -770,6 +833,27 @@ func (i instances) SetProxy(id string, proxyConfig *ProxyConfig) error {
 func (i instances) SetProxyFromStruct(id string, data *SetProxyStruct) error {
 	if data == nil {
 		return fmt.Errorf("proxy data cannot be nil")
+	}
+
+	instance, err := i.instanceRepository.GetInstanceByID(id)
+	if err != nil {
+		return err
+	}
+
+	storedProxy := strings.TrimSpace(instance.Proxy)
+	if storedProxy != "" && storedProxy != "null" {
+		var currentProxy ProxyConfig
+		if err := json.Unmarshal([]byte(storedProxy), &currentProxy); err == nil {
+			if data.Protocol == "" {
+				data.Protocol = currentProxy.Protocol
+			}
+			if data.Username == "" {
+				data.Username = currentProxy.Username
+			}
+			if data.Password == "" {
+				data.Password = currentProxy.Password
+			}
+		}
 	}
 
 	proxyConfig := &ProxyConfig{

@@ -51,6 +51,8 @@ import (
 type WhatsmeowService interface {
 	StartClient(clientData *ClientData)
 	ConnectOnStartup(clientName string)
+	StartConnectionWatchdog(clientName string)
+	ScheduleReconnect(instanceId string, reason string, delay time.Duration)
 	StartInstance(instanceId string) error
 	ReconnectClient(instanceId string) error
 	ClearInstanceCache(instanceId string, token string) error
@@ -86,6 +88,7 @@ type whatsmeowService struct {
 	exPath             string
 	mediaStorage       storage_interfaces.MediaStorage
 	processedMessages  *cache.Cache
+	reconnectLocks     *cache.Cache
 	natsProducer       producer_interfaces.Producer
 	loggerWrapper      *logger_wrapper.LoggerManager
 }
@@ -442,7 +445,7 @@ func (w whatsmeowService) StartClient(cd *ClientData) {
 		}
 	}
 
-	client.EnableAutoReconnect = false
+	client.EnableAutoReconnect = true
 	client.AutoTrustIdentity = true
 
 	mycli := &MyClient{
@@ -1779,13 +1782,8 @@ func (mycli *MyClient) myEventHandler(rawEvt interface{}) {
 			mycli.loggerWrapper.GetLogger(mycli.userID).LogError("[%s] Error updating instance: %s", mycli.Instance.Id, err)
 		}
 
-		// Trigger instance restart via websocket-capable service (non-blocking)
-		go func(instanceID string) {
-			mycli.loggerWrapper.GetLogger(instanceID).LogInfo("[%s] Disconnected detected, restarting instance", instanceID)
-			if err := mycli.service.ReconnectClient(instanceID); err != nil {
-				mycli.loggerWrapper.GetLogger(instanceID).LogError("[%s] Failed to restart instance: %v", instanceID, err)
-			}
-		}(mycli.userID)
+		// Native auto-reconnect handles short drops; this debounced restart is the fallback.
+		mycli.service.ScheduleReconnect(mycli.userID, "disconnected_event", 5*time.Second)
 	case *events.LabelEdit:
 		doWebhook = true
 		postMap["event"] = "LabelEdit"
@@ -2190,6 +2188,106 @@ func (w whatsmeowService) ConnectOnStartup(clientName string) {
 	}
 }
 
+func (w whatsmeowService) StartConnectionWatchdog(clientName string) {
+	if !w.config.SendOnlyMode {
+		w.loggerWrapper.GetLogger(clientName).LogInfo("[%s] Connection watchdog skipped because send-only mode is disabled", clientName)
+		return
+	}
+
+	interval := 5 * time.Minute
+	w.loggerWrapper.GetLogger(clientName).LogInfo("[%s] Send-only connection watchdog started (interval: %s)", clientName, interval)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		var instances []*instance_model.Instance
+		var err error
+
+		if clientName != "" {
+			instances, err = w.instanceRepository.GetAll(clientName)
+		} else {
+			instances, err = w.instanceRepository.GetAllConnectedInstances()
+		}
+
+		if err != nil {
+			w.loggerWrapper.GetLogger(clientName).LogError("[%s] Connection watchdog failed to list instances: %v", clientName, err)
+			continue
+		}
+
+		for _, instance := range instances {
+			if instance == nil || strings.TrimSpace(instance.Jid) == "" {
+				continue
+			}
+
+			if strings.Contains(strings.ToLower(instance.DisconnectReason), "logged out") {
+				w.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Watchdog skipped reconnect because session is logged out", instance.Id)
+				continue
+			}
+
+			client, exists := w.clientPointer[instance.Id]
+			if exists && client != nil && client.IsConnected() && client.IsLoggedIn() {
+				if !instance.Connected || strings.TrimSpace(instance.DisconnectReason) != "" {
+					if err := w.instanceRepository.UpdateConnected(instance.Id, true, ""); err != nil {
+						w.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Watchdog failed to mark recovered runtime as connected: %v", instance.Id, err)
+					} else {
+						w.loggerWrapper.GetLogger(instance.Id).LogInfo("[%s] Watchdog marked recovered runtime as connected", instance.Id)
+					}
+				}
+				continue
+			}
+
+			w.loggerWrapper.GetLogger(instance.Id).LogWarn("[%s] Watchdog detected stale connection (runtime=%t, dbConnected=%t, reason=%s)", instance.Id, exists, instance.Connected, instance.DisconnectReason)
+			w.ScheduleReconnect(instance.Id, "watchdog_stale_connection", time.Duration(rand.Intn(20))*time.Second)
+		}
+	}
+}
+
+func (w whatsmeowService) ScheduleReconnect(instanceId string, reason string, delay time.Duration) {
+	instanceId = strings.TrimSpace(instanceId)
+	if instanceId == "" {
+		return
+	}
+
+	if w.reconnectLocks == nil {
+		w.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] Reconnect requested without lock cache, running directly (reason=%s)", instanceId, reason)
+		go func() {
+			if delay > 0 {
+				time.Sleep(delay)
+			}
+			if err := w.ReconnectClient(instanceId); err != nil {
+				w.loggerWrapper.GetLogger(instanceId).LogError("[%s] Failed to reconnect instance: %v", instanceId, err)
+			}
+		}()
+		return
+	}
+
+	if err := w.reconnectLocks.Add(instanceId, reason, 2*time.Minute); err != nil {
+		w.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Reconnect already scheduled, skipping duplicate request (reason=%s)", instanceId, reason)
+		return
+	}
+
+	go func() {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+
+		if client, exists := w.clientPointer[instanceId]; exists && client != nil && client.IsConnected() && client.IsLoggedIn() {
+			w.reconnectLocks.Delete(instanceId)
+			if err := w.instanceRepository.UpdateConnected(instanceId, true, ""); err != nil {
+				w.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] Failed to mark recovered client as connected: %v", instanceId, err)
+			}
+			w.loggerWrapper.GetLogger(instanceId).LogInfo("[%s] Reconnect skipped because client recovered before restart (reason=%s)", instanceId, reason)
+			return
+		}
+
+		w.loggerWrapper.GetLogger(instanceId).LogWarn("[%s] Reconnect scheduled by %s", instanceId, reason)
+		if err := w.ReconnectClient(instanceId); err != nil {
+			w.loggerWrapper.GetLogger(instanceId).LogError("[%s] Failed to reconnect instance: %v", instanceId, err)
+		}
+	}()
+}
+
 func getExtensionFromMimeType(mimeType string) string {
 	switch mimeType {
 	case "image/jpeg":
@@ -2563,6 +2661,7 @@ func NewWhatsmeowService(
 		exPath:             exPath,
 		mediaStorage:       mediaStorage,
 		processedMessages:  cache.New(30*time.Minute, 1*time.Hour),
+		reconnectLocks:     cache.New(10*time.Minute, 1*time.Minute),
 		natsProducer:       natsProducer,
 		loggerWrapper:      loggerWrapper,
 	}
